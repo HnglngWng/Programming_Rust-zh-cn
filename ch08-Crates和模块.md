@@ -76,7 +76,7 @@ image = "0.6.1"
 crossbeam = "0.2.8"
 ```
 
-这里的词 *dependencies* 意味着该项目使用的其他crate:我们依赖的代码.我们在[crates.io](https://crates.io/)上发现了这些crate,这是Rust社区开源crate的网站.例如,我们通过访问crates.io并搜索图像库(mage library)来了解`image`库.crates.io上的每个crate页面都提供了文档和源代码的链接,以及一行配置,如`image ="0.6.1"`,你可以复制并添加到你的 *Cargo.toml* .这里显示的版本号只是我们编写程序时这三个软件包的最新版本.
+这里的词 *dependencies* 意味着该项目使用的其他crate:我们依赖的代码.我们在[crates.io](https://crates.io/)上发现了这些crate,这是Rust社区开源crate的网站.例如,我们通过访问crates.io并搜索图像库(image library)来了解`image`库.crates.io上的每个crate页面都提供了文档和源代码的链接,以及一行配置,如`image ="0.6.1"`,你可以复制并添加到你的 *Cargo.toml* .这里显示的版本号只是我们编写程序时这三个软件包的最新版本.
 
 Cargo副本讲述了如何使用这些信息的故事.当我们运行`cargo build`时,Cargo首先从crates.io下载这些crate的指定版本的源代码.然后,它会读取这些`crate`的 *Cargo.toml* 文件,下载 *它们的(their)* 依赖,等等递归.例如,`image`crate的0.6.1版的源代码包含一个`Cargo.toml`文件,它包含以下内容:
 
@@ -694,3 +694,508 @@ fn main() {
 ```
 
 随着时间的推移,Rust团队有时会 *稳定(stabilizes)* 实验性功能,因此它成为语言的标准部分.然后`#![feature]`属性变得多余,Rust会生成警告,建议你将其删除.
+
+## 测试和文档(Tests and Documentation)
+
+正如我们在第11页的"编写和运行单元测试(Writing and Running Unit Tests)"中所看到的,Rust中内置了一个简单的单元测试框架.测试是标有`#[test]`属性的普通函数.
+
+```Rust
+#[test]
+fn math_works() {
+    let x: i32 = 1;
+    assert!(x.is_positive());
+    assert_eq!(x + 1, 2);
+}
+```
+
+`cargo test`运行项目中的所有测试.
+
+```Shell
+$ cargo test
+   Compiling math_test v0.1.0 (file:///.../math_test)
+     Running target/release/math_test-e31ed91ae51ebf22
+running 1 test
+test math_works ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured
+```
+
+(你还会看到一些关于"doc-tests"的输出,我们将在一分钟内得到它).
+
+无论你的crate是可执行文件还是库,这都是一样的.你可以通过将参数传递给Cargo来运行特定测试:`cargo test math`运行所有在其名称中包含`math`的测试.
+
+测试通常使用Rust标准库中的`assert!`和`assert_eq!`宏.如果`expr`为真,则`assert!(expr)`成功.否则,它会引起恐慌,导致测试失败.`assert_eq!(v1, v2)`就像`assert!(v1 == v2)`一样,如果断言失败,错误消息显示两个值.
+
+你可以在普通代码中使用这些宏来检查不变量,但请注意`assert!`和`assert_eq!`即使在发布版本中也包含在内.使用`debug_assert!`和`debug_assert_eq!`去替代,编写仅在调试版本中检查的断言.
+
+要测试错误情况,请将`#[should_panic]`属性添加到测试中:
+
+```Rust
+/// This test passes only if division by zero causes a panic,
+/// as we claimed in the previous chapter.
+#[test]
+#[should_panic(expected="divide by zero")]
+fn test_divide_by_zero_error() {
+    1 / 0;  // should panic!
+}
+```
+
+标有`#[test]`的函数是有条件编译的.当你运行`cargo test`时,Cargo会在你的测试和测试工具启用的情况下构建程序的副本.普通`cargo build`或`cargo build --release`跳过测试代码.这意味着你的单元测试可以与他们测试的代码一起使用,如果需要,可以访问内部实现细节,但是没有运行时成本.然而,它可能会导致一些警告.例如:
+
+```Rust
+fn roughly_equal(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-6
+}
+
+#[test]
+fn trig_works() {
+    use std::f64::consts::PI;
+    assert!(roughly_equal(PI.sin(), 0.0));
+}
+```
+
+在测试版本中,这很好.在非测试版本中,`approximate_equal`未使用,Rust会抱怨:
+
+```Shell
+$ cargo build
+   Compiling math_test v0.1.0 (file:///.../math_test)
+warning: function is never used: `roughly_equal`
+ --> src/crates_unused_testing_function.rs:7:1
+  |
+7 | / fn roughly_equal(a: f64, b: f64) -> bool {
+8 | |     (a - b).abs() < 1e-6
+9 | | }
+  | |_^
+  |
+   = note: #[warn(dead_code)] on by default
+```
+
+因此,当你的测试变得足够大以至于需要支持代码时,惯例是将它们放在`test`模块中并使用`#[cfg]`属性声明整个模块仅进行测试:
+
+```Rust
+#[cfg(test)]
+// include this module only when testing
+mod tests {
+    fn roughly_equal(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    #[test] fn trig_works() {
+        use std::f64::consts::PI;
+        assert!(roughly_equal(PI.sin(), 0.0));
+    }
+}
+```
+
+Rust的测试工具使用多个线程一次运行多个测试,默认情况下,Rust代码的一个很好的附带好处是线程安全. (要禁用此功能,请运行单个测试,`cargo test` *`testname`* ;或将环境变量`RUST_TEST_THREADS`设置为1.)这意味着,从技术上讲,我们在第2章中展示的Mandelbrot程序不是该章中的第二个多线程程序,而是第三个!第11页的"编写和运行单元测试(Writing and Running Unit Tests)"中的`cargo test`是第一个.
+
+### 集成测试(Integration Tests)
+
+你的蕨类植物模拟器继续增长.你决定将所有主要功能放入可由多个可执行文件使用的库中.如果使用 *fern_sim.rlib* 作为外部包,那么使用最终用户的方式与库链接的测试会很不错.此外,你还有一些测试通过从二进制文件加载已保存的模拟开始,并且在 *src* 目录中有这些大型测试文件很不方便.集成测试有助于解决这两个问题.
+
+集成测试是 *.rs* 文件,它们位于项目的 *src* 目录旁边的 *tests* 目录中.当你运行`cargo test`时,Cargo会将每个集成测试编译为单独的,独立的crate,与你的库和Rust测试工具链接.这是一个例子:
+
+```Rust
+// tests/unfurl.rs - Fiddleheads unfurl in sunlight
+
+extern crate fern_sim;
+use fern_sim::Terrarium;
+use std::time::Duration;
+
+#[test]
+fn test_fiddlehead_unfurling() {
+    let mut world = Terrarium::load("tests/unfurl_files/fiddlehead.tm");
+    assert!(world.fern(0).is_furled());
+    let one_hour = Duration::from_secs(60 * 60);
+    world.apply_sunlight(one_hour);
+    assert!(world.fern(0).is_fully_unfurled());
+}
+```
+
+请注意,集成测试包括`extern crate`声明,因为它使用`fern_sim`作为库.集成测试的重点在于,他们可以从外部看到你的crate,就像用户一样.他们测试crate的公有API.
+
+`cargo test`同时运行单元测试和集成测试.要仅在特定文件中运行集成测试--例如, *tests/unfurl.rs* --使用命令`cargo test --test unfurl`.
+
+### 文档(Documentation)
+
+命令`cargo doc`为你的库创建HTML文档:
+
+```Shell
+$ cargo doc --no-deps --open
+ Documenting fern_sim v0.1.0 (file:///.../fern_sim)
+```
+
+`--no-deps`选项告诉Cargo仅为`fern_sim`本身生成文档,而不是为它所依赖的所有crate生成文档.
+
+`--open`选项告诉Cargo之后在浏览器中打开文档.
+
+你可以在图8-2中看到结果.Cargo将新文档文件保存在 *target/doc* 中.起始页面是 *target/doc/fern_sim/index.html* .
+
+*图8-2. rustdoc生成的文档示例*
+
+该文档从你的库的pub功能,以及你附加到它们的任何 *文档注释(doc comments)* 生成.我们已经在本章中看到了一些文档注释.他们看起来像注释:
+
+```Rust
+/// Simulate the production of a spore by meiosis.
+pub fn produce_spore(factory: &mut Sporangium) -> Spore {
+    ...
+}
+```
+
+但是当Rust看到以三个斜杠开头的注释时,它会将它们视为`#[doc]`属性.Rust将前面的示例视作与此完全相同:
+
+```Rust
+#[doc = "Simulate the production of a spore by meiosis."]
+pub fn produce_spore(factory: &mut Sporangium) -> Spore {
+    ...
+}
+```
+
+编译或测试库时,将忽略这些属性.生成文档时,公有功能上的doc注释包含在输出中.
+
+同样,以`//!`开头的评论被视为`#![doc]`属性,并附加到封闭功能,通常是模块或crate.例如,你的 *fern_sim/src/lib.rs* 文件可能开始如下所示:
+
+```Rust
+//! Simulate the growth of ferns, from the level of
+//! individual cells on up.
+```
+
+文档注释的内容被视为Markdown,简单HTML格式的简写表示法.星号用于`*斜体*`和`**粗体**`,空行被视为段落,等等.但是,你也可以依赖HTML;你的文档注释中的任何HTML标记都会逐字复制到文档中.
+
+你可以使用`` `backticks` ``在运行文本的中间设置代码位.在输出中,这些片段将以固定宽度字体格式化.可以通过缩进四个空格来添加更大的代码示例.
+
+```Rust
+/// A block of code in a doc comment:
+///
+///     if everything().works() {
+///         println!("ok");
+///     }
+```
+
+你还可以使用Markdown防护代码块.这具有完全相同的效果.
+
+```Rust
+/// Another snippet, the same code, but written differently:
+///
+/// ```
+/// if everything().works() {
+///     println!("ok");
+/// }
+/// ```
+```
+
+无论你使用哪种格式,当你在文档注释中包含一段代码时,都会发生一件有趣的事情.Rust会自动将其转换为测试.
+
+### 文档测试(Doc-Tests)
+
+当你在Rust库crate中运行测试时,Rust会检查文档中显示的所有代码是否实际运行并正常运行.它通过获取文档注释中出现的每个代码块,将其编译为单独的可执行crate,将其链接到你的库并运行它来实现此目的.
+
+这是文档测试的独立示例.通过`cargo new ranges`创建一个新项目,并将此代码放在 *range/src/lib.rs* 中:
+
+```Rust
+use std::ops::Range;
+/// Return true if two ranges overlap.
+///
+///     assert_eq!(ranges::overlap(0..7, 3..10), true);
+///     assert_eq!(ranges::overlap(1..5, 101..105), false);
+///
+/// If either range is empty, they don't count as overlapping.
+///
+///     assert_eq!(ranges::overlap(0..0, 0..10), false);
+///
+pub fn overlap(r1: Range<usize>, r2: Range<usize>) -> bool {
+    r1.start < r1.end && r2.start < r2.end &&
+        r1.start < r2.end && r2.start < r1.end
+}
+```
+
+文档注释中的两个小代码块出现在`cargo doc`生成的文档中,如图8-3所示.
+
+*图8-3. 展示一些文档测试的文档*
+
+它们也成为两个独立的测试:
+
+```Shell
+$ cargo test
+   Compiling ranges v0.1.0 (file:///.../ranges)
+...
+   Doc-tests ranges
+running 2 tests
+test overlap_0 ... ok
+test overlap_1 ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured
+```
+
+如果你将`--verbose`标志传递给Cargo,你会发现它正在使用`rustdoc --test`运行这两个测试.Rustdoc将每个代码示例存储在一个单独的文件中,添加几行样板代码,以生成两个程序.这是第一个:
+
+```Rust
+extern crate ranges;
+fn main() {
+    assert_eq!(ranges::overlap(0..7, 3..10), true);
+    assert_eq!(ranges::overlap(1..5, 101..105), false);
+}
+```
+
+这是第二个:
+
+```Rust
+extern crate ranges;
+fn main() {
+    assert_eq!(ranges::overlap(0..0, 0..10), false);
+}
+```
+
+如果这些程序编译并成功运行,则测试通过.
+
+这两个代码示例包含断言,但这只是因为在这种情况下.断言会提供合适的文档.文档测试背后的想法不是将所有测试都放入注释中.相反,你编写了最好的文档,Rust确保文档中的代码示例实际编译和运行.
+
+通常,最小的工作示例包括使代码编译所必需的一些细节,例如导入或设置代码,但仅仅在文档中显示的重要性不够.要隐藏代码示例的一行,请在该行的开头添加一个`#`后跟一个空格:
+
+```Rust
+/// Let the sun shine in and run the simulation for a given
+/// amount of time.
+///
+///     # use fern_sim::Terrarium;
+///     # use std::time::Duration;
+///     # let mut tm = Terrarium::new();
+///     tm.apply_sunlight(Duration::from_secs(60));
+///
+pub fn apply_sunlight(&mut self, time: Duration) {
+    ...
+}
+```
+
+有时在文档中显示完整的示例程序是有帮助的,包括`main`函数和`estern crate`声明.显然,如果这些代码片段出现在你的代码示例中,你也不希望Rustdoc自动添加它们.结果不会编译.因此,Rustdoc将包含确切字符串`fn main`的任何代码块视为完整程序,并且不向其添加任何内容.
+
+可以针对特定代码块禁用测试.要告诉Rust编译你的示例,但没有实际运行它,请使用带有`no_run`注解的防护代码块:
+
+```Rust
+/// Upload all local terrariums to the online gallery.
+///
+/// ```no_run
+/// let mut session = fern_sim::connect();
+/// session.upload_all();
+/// ```
+pub fn upload_all(&mut self) {
+    ...
+}
+```
+
+如果甚至不希望编译代码,请使用`ignore`而不是`no_run`.如果代码块根本不是Rust代码,请使用该语言的名称,如`c++`或`sh`,或纯文本的`text`.`rustdoc`不知道数百种编程语言的名称;相反,它会将其无法识别的任何注解视为表示代码块不是Rust.这会禁用代码高亮以及文档测试.
+
+## 指定依赖(Specifying Dependencies)
+
+我们已经看到了一种告诉Cargo在哪里获取你的项目所依赖的crates的源代码的方法:按版本号.
+
+```Toml
+image = "0.6.1"
+```
+
+有几种方法可以指定依赖,还有一些相当微妙的事情你可能想要说明要使用哪些版本,因此值得花几页(篇幅).
+
+首先,你可能希望使用未在crates.io上发布的依赖.一种方法是通过指定Git存储库URL和修订版本:
+
+```Toml
+image = { git = "https://github.com/Piston/image.git", rev = "528f19c" }
+```
+
+这个特殊的包是开源的,托管在GitHub上,但你可以轻松地指向企业网络上托管的私有Git存储库.如此处所示,你可以指定要使用的特定`rev`,`tag`或`branch`.(这些都是告诉Git要检出的源代码修订版的所有方法.)
+
+另一种方法是指定包含crate源代码的目录:
+
+```Toml
+image = { path = "vendor/image" }
+```
+
+当你的团队有一个单一的版本控制存储库,其中包含多个crate的源代码或整个依赖关系图时,这很方便.每个crate可以使用相对路径指定其依赖关系.
+
+对依赖关系进行这种级别的控制非常强大.如果你决定使用的任何开源crate并不完全符合你的喜好,你可以轻松地fork:只需点击GitHub上的Fork按钮并更改 *Cargo.toml* 文件中的一行即可.你的下一次`cargo build`将无缝地使用你的crate的fork而不是正式版本.
+
+### 版本(Versions)
+
+当你在 *Cargo.toml* 文件中写出像`image ="0.6.1"` 之类的内容时,Cargo会相当宽泛地解释它.它使用与版本0.6.1兼容的最新版本的`image`.
+
+兼容性规则适用于[语义化版本](http://semver.org/).
+
+- 以0.0开头的版本号是如此原始,以至于Cargo从不认为它与任何其他版本兼容.
+
+- 以0.x开头的版本号,其中x非零,被认为与0.x系列中的其他点发行版本兼容.我们指定了`image`版本0.6.1,但Cargo将使用0.6.3(如果可用).(这不是语义化版本标准所说的关于0.x版本号的内容,但事实证明该规则太有用了.)
+
+- 一旦项目达到1.0,只有新的主要版本会破坏兼容性.因此,如果你要求版本2.0.1,Cargo可能会使用2.17.99,而不是3.0.
+
+默认情况下,版本号是灵活的,否则使用哪个版本的问题很快就会过度约束.假设一个库`libA`使用`num ="0.1.31"`,而另一个库`libB`使用`num ="0.1.29"`.如果版本号需要精确匹配,则没有项目可以将这两个库一起使用.允许Cargo使用任何兼容版本是一个更实用的默认值.
+
+不过,在涉及到依赖关系和版本控制时,不同的项目有不同的需求.你可以使用运算符指定确切的版本或版本的范围:
+
+|Cargo.toml行|含义|
+|:--|:--|
+|`image = "=0.10.0"`|仅使用精确版本0.10.0|
+|`image = ">=1.0.5"`|使用1.0.5或 *任何(any)* 更高版本(甚至2.9,如果可用)|
+|`image = ">1.0.5 <1.1.9"`|使用高于1.0.5但低于1.1.9的版本|
+|`image = "<=2.7.10"`|使用最高2.7.10的任何版本|
+
+你偶尔会看到的另一个版本规范是通配符`*`.这告诉Cargo任何版本都可以.除非某些其他 *Cargo.toml* 文件包含更具体的约束,否则Cargo将使用最新的可用版本.[*doc.crates.io* 上的Cargo文档](http://doc.crates.io/crates-io.html)更详细地介绍了版本规范.
+
+请注意,兼容性规则意味着无法仅出于营销原因选择版本号.他们实际意味着什么.它们是crate维护者和用户之间的合同.如果你维护的crate是1.7版本,并且你决定删除某函数或进行任何其他不完全向后兼容的更改,则必须将版本号提升至2.0.如果你将其称为1.8,那么你将声称新版本与1.7兼容,但是你的用户可能会发现自己的构建已损坏.
+
+### Cargo.lock(Cargo.lock)
+
+*Cargo.toml* 中的版本号是故意灵活的,但我们不希望Cargo每次构建时都将我们升级到最新的库版本.想象一下,当`cargo build`突然升级到一个新版本的库时,正处于激烈的调试会话中.这可能是令人难以置信的破坏性.在调试过程中发生任何变化都是不好的.事实上,谈到库时,从来没有一个意外变化的好时机.
+
+因此Cargo有一个内置机制来防止这种情况发生.第一次构建项目时,Cargo输出一个 *Cargo.lock* 文件,该文件记录了它使用的每个crate的确切版本.以后的版本将查阅此文件并继续使用相同的版本.只有当你通过手动提升 *Cargo.toml* 文件中的版本号或通过运行`cargo update`时,Cargo才能升级到更新的版本:
+
+```Shell
+$ cargo update
+    Updating registry `https://github.com/rust-lang/crates.io-index`
+    Updating libc v0.2.7 -> v0.2.11
+    Updating png v0.4.2 -> v0.4.3
+```
+
+`cargo update`仅升级到与你在 *Cargo.toml* 中指定的内容兼容的最新版本.如果你指定了`image ="0.6.1"`,并且想要升级到版本`0.10.0`,则必须在 *Cargo.toml* 中更改它.下次构建时,Cargo将更新到新版本的`image`库并将新版本号存储在 *Cargo.lock* 中.
+
+上面的示例显示Cargo更新了托管在[crates.io](https://crates.io/)上的两个crate.对于存储在Git中的依赖,会发生类似的事情.假设我们的 *Cargo.toml* 文件包含以下内容:
+
+```Toml
+image = { git = "https://github.com/Piston/image.git", branch = "master" }
+```
+
+如果看到我们有一个 *Cargo.lock* 文件,`cargo build`将不会从Git存储库中提取(pull)新的更改.相反,它读取 *Cargo.lock* 并使用与上次相同的修订版.但`cargo update`将从`master`中提取(pull),以便我们的下一次构建使用最新版本.
+
+*Cargo.lock* 会自动为你生成,你通常不会手动编辑它.尽管如此,如果你的项目是可执行文件,则应将 *Cargo.lock* 提交(commit)到版本控制.这样,构建项目的每个人都将始终获得相同的版本. *Cargo.lock* 文件的历史记录将记录你的依赖更新.
+
+如果你的项目是普通的Rust库,请不要操心地提交 *Cargo.lock* .你的库的下游用户将拥有 *Cargo.lock* 文件,其中包含整个依赖图的版本信息;他们会忽略你的库的 *Cargo.lock* 文件.在极少数情况下,你的项目是共享库(即输出是 *.dll* , *.dylib* 或 *.so* 文件,没有这样的下游`cargo`用户,因此你应该提交 *Cargo.lock* .
+
+*Cargo.toml* 灵活的版本说明符使你可以轻松地在项目中使用Rust库,并最大限度地提高库之间的兼容性. *Cargo.lock* 的簿记支持跨机器的一致性,可重复的构建.它们共同帮助你避免依赖地狱.
+
+## 将Crates发布到crates.io(Publishing Crates to crates.io)
+
+你决定将你的蕨类模拟库发布为开源软件.恭喜!这部分很容易.
+
+首先,确保Cargo可以为你打包crate.
+
+```Shell
+$ cargo package
+warning: manifest has no description, license, license-file, documentation,
+homepage or repository. See http://doc.crates.io/manifest.html#package-metadata
+for more info.
+   Packaging fern_sim v0.1.0 (file:///.../fern_sim)
+   Verifying fern_sim v0.1.0 (file:///.../fern_sim)
+   Compiling fern_sim v0.1.0 (file:///.../fern_sim/target/package/fern_sim-0.1.0)
+```
+
+`cargo package`命令创建一个文件(在本例中为 *target/package/fern_sim-0.1.0.crate* ),其中包含所有库的源文件,包括 *Cargo.toml* .这是你要上传到[crates.io](https://crates.io/)以与世界分享的文件.(你可以使用`cargo package --list`来查看包含哪些文件.)然后,Cargo通过从 *.crate* 文件构建库来仔细复核其工作,就像最终用户一样.
+
+Cargo警告说, *Cargo.toml* 的`[package]`部分缺少一些对下游用户很重要的信息,例如你分发代码的许可证.警告中的URL是一个很好的资源,因此我们不会在此详细解释所有字段.简而言之,您可以通过向 *Cargo.toml* 添加几行来修复警告:
+
+```Toml
+[package]
+name = "fern_sim"
+version = "0.1.0"
+authors = ["You <you@example.com>"]
+license = "MIT"
+homepage = "https://fernsim.example.com/"
+repository = "https://gitlair.com/sporeador/fern_sim"
+documentation = "http://fernsim.example.com/docs"
+description = """
+Fern simulation, from the cellular level up.
+"""
+```
+
+Note:一旦你在crates.io上发布此包，任何下载你的包的人都可以看到 *Cargo.toml* 文件.因此,如果`authors`字段包含你更想保密的电子邮件地址,那么现在是时候更改它了.
+
+此阶段有时会出现的另一个问题是你的 *Cargo.toml* 文件可能按`path`指定其他crate的位置,如"指定依赖(Specifying Dependencies)"(第185页)中所示:
+
+```Toml
+image = { path = "vendor/image" }
+```
+
+对于你和你的团队,这可能会很好.但很自然,当其他人下载`fern_sim`库时,他们的计算机上没有相同的文件和目录.因此Cargo会 *忽略(ignores)* 自动下载的库中的`path`键,这可能会导致构建错误.但是,修复很简单:如果你的库将在crates.io上发布,它的依赖项也应该在crates.io上.指定版本号而不是`path`:
+
+```Toml
+image = "0.6.1"
+```
+
+如果你愿意,可以指定一个`path`,它优先于你自己的本地构建,和一个给所有其他用户的`version`:
+
+```Toml
+image = { path = "vendor/image", version = "0.6.1" }
+```
+
+当然,在这种情况下,你有责任确保两者保持同步.
+
+最后,在发布crate之前,你需要登录crates.io并获取API密钥.这一步很简单:一旦你在crates.io上拥有一个帐户,你的"帐户设置(Account Settings)"页面将显示`cargo login`命令,如下所示:
+
+```Shell
+$ cargo login 5j0dV54BjlXBpUUbfIj7G9DvNl1vsWW1
+$
+```
+
+Cargo将密钥保存在配置文件中,API密钥应该保密,就像密码一样.因此,只能在你控制的计算机上运行此命令.
+
+完成后,最后一步是运行`cargo publish`:
+
+```Shell
+$ cargo publish
+    Updating registry `https://github.com/rust-lang/crates.io-index`
+   Uploading fern_sim v0.1.0 (file:///.../fern_sim)
+```
+
+有了这个,你的库就加入了crates.io上成千上万的其他库中.
+
+## 工作区(Workspaces)
+
+随着你的项目不断发展,你最终会编写许多crate.它们并排存在于单个源存储库中:
+
+```Shell
+fernsoft/
+├── .git/...
+├── fern_sim/
+│   ├── Cargo.toml
+│   ├── Cargo.lock
+│   ├── src/...
+│   └── target/...
+├── fern_img/
+│   ├── Cargo.toml
+│   ├── Cargo.lock
+│   ├── src/...
+│   └── target/...
+└── fern_video/
+    ├── Cargo.toml
+    ├── Cargo.lock
+    ├── src/...
+    └── target/...
+```
+
+Cargo的工作方式,每个crate都有自己的构建目录,`target`,它包含所有crate的依赖项的单独构建.这些构建目录完全独立.即使两个crates具有共同的依赖,它们也不能共享任何已编译的代码.这很浪费.
+
+你可以使用Cargo工作区(共享公共构建目录和 *Cargo.lock* 文件的包集合)来节省编译时间和磁盘空间.
+
+你需要做的就是在存储库的根目录中创建一个 *Cargo.toml* 文件,并将这些行放入其中:
+
+```Toml
+[workspace]
+members = ["fern_sim", "fern_img", "fern_video"]
+```
+
+其中`fern_sim`等是包含你的crates的子目录的名称.删除这些子目录中存在的任何剩余的 *Cargo.lock* 文件和 *target* 目录.
+
+完成此操作后,任何crate中的`cargo build`都将自动创建并使用根目录下的共享构建目录(在本例中为 *fernsoft/target* ).命令`cargo build --all`在当前工作区中构建所有包.`cargo test`和`cargo doc`也接受`--all`选项.
+
+## 更多美好的事情(More Nice Things)
+
+如果你还不高兴的话,Rust社区还有更多的零碎的东西给你:
+
+- 当你在[crates.io](https://crates.io/)上发布开源crate时,感谢Onur Aslan,你的文档会自动呈现并托管在 *docs.rs* 上.
+
+- 如果你的项目在GitHub上,Travis CI可以在每次推送(push)时构建和测试你的代码.设置起来非常简单;有关详细信息,请参阅[travis-ci.org](https://travis-ci.org/).如果你已经熟悉Travis,这个 *.travis.yml* 文件将帮助你入门:
+
+```Yaml
+    language: rust
+    rust:
+      - stable
+```
+
+- 你可以从crate的顶级文档注释中生成 *README.md* 文件.此功能由Livio Ribeiro作为第三方Cargo插件提供.运行`cargo install readme`安装插件,然后`cargo readme --help`学习如何使用它.
+
+我们可以继续.
+
+Rust是新的,但它旨在支持大型,雄心勃勃的项目.它有很棒的工具和活跃的社区.系统程序员 *可以(can)* 拥有美好的东西.
