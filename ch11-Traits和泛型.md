@@ -129,6 +129,208 @@ let mut buf: Vec<u8> = vec![];
 let writer: Write = buf;  // error: `Write` does not have a constant size
 ```
 
-变量的大小必须在编译时知道,并且实现`Write`的类型可以是任何大小.
+变量的大小必须在编译时知道,但是实现`Write`的类型可以是任何大小.
 
 如果你来自C#或Java,这可能会很惊讶,但原因很简单.在Java中,`OutputStream`类型的变量(类似于`std::io::Write`的Java标准接口)是对实现`OutputStream`的任何对象的引用.它是一个引用,不言而喻的事实.它与C#和大多数其他语言中的接口相同.
+
+我们在Rust中想要的是同样的东西,但在Rust中,引用是显式的:
+
+```Rust
+let mut buf: Vec<u8> = vec![];
+let writer: &mut Write = &mut buf;  // ok
+```
+
+对trait类型(如`writer`)的引用称为 *trait对象(trait object)* .与任何其他引用一样,trait对象指向某个值,它有生命周期,并且可以是`mut`或共享的.
+
+使trait对象与众不同的是,Rust通常在编译时不知道所引用的对象的类型.因此,trait对象包含关于引用的对象的类型的一些额外信息.这完全是为了Rust在幕后使用的:当你调用`writer.write(data)`时,Rust需要类型信息来根据`*writer`的类型动态调用正确的`write`方法.你不能直接查询类型信息,Rust不支持从trait对象`&mut Writer`向下转换到像`Vec<u8>`这样的具体类型.
+
+### Trait对象布局(Trait Object Layout)
+
+在内存中,trait对象是一个胖指针,由指向值的指针和指向表示该值类型的表的指针组成.因此,每个trait对象占用两个机器字,如图11-1所示.
+
+*图11-1. 内存中的Trait对象*
+
+C++也有这种运行时类型信息.它被称为 *虚函数表(virtual table)* 或 *(虚表)vtable* .在Rust中,与在C++中一样,虚表在编译时生成一次,并由相同类型的所有对象共享.图11-1中以深灰色显示的所有内容(包括虚表)都是Rust的私有实现细节.同样,这些不是你可以直接访问的字段和数据结构.相反,当你调用trait对象的方法时,该语言会自动使用虚表,以确定要调用的实现.
+
+经验丰富的C++程序员会注意到Rust和C++使用的内存有点不同.在C++中,虚表指针(或 *vptr* )存储为结构的一部分.Rust使用胖指针代替.结构本身只包含其字段. 这样,一个结构可以实现几十个特征,而不必包含几十个虚表指针.甚至像`i32`这样的类型,它们不足以容纳虚表指针,也可以实现trait.
+
+Rust会在需要时自动将普通引用转换为trait对象.这就是为什么我们能够在这个例子中将`&mut local_file`传递给`say_hello`:
+
+```Rust
+let mut local_file = File::create("hello.txt")?;
+say_hello(&mut local_file)?;
+```
+
+`&mut local_file`的类型是`&mut File`,`say_hello`的参数类型是`&mut Write`.由于`File`是一种writer,Rust允许这样做,自动将普通引用转换为trait对象.
+
+同样,Rust会很乐意将`Box<File>`转换为`Box<Write>`,这是一个拥有堆中writer的值:
+
+```Rust
+let w: Box<Write> = Box::new(local_file);
+```
+
+`Box<Write>`,和`&mut Write`一样,是一个胖指针:它包含writer本身的地址和虚表指针的地址.其他指针类型(如`Rc<Write>`)也是如此.
+
+这种转换是创建trait对象的唯一方法.计算机实际上在这里做的非常简单.在转换发生时,Rust知道引用的对象的真实类型(在本例中为`File`),因此它只是添加了相应虚表的地址,将常规指针转换为胖指针.
+
+### 泛型函数(Generic Functions)
+
+在本章的开头,我们展示了一个将trait对象作为参数的`say_hello()`函数.让我们将该函数重写为泛型函数:
+
+```Rust
+fn say_hello<W: Write>(out: &mut W) -> std::io::Result<()> {
+    out.write_all(b"hello world\n")?;
+    out.flush()
+}
+```
+
+只有类型签名发生了变化:
+
+```Rust
+fn say_hello(out: &mut Write)         // plain function
+
+fn say_hello<W: Write>(out: &mut W)   // generic function
+```
+
+短语`<W：Write>`是使函数泛型的原因.这是一个 *类型参数(type parameter)* .这意味着在整个函数体中,`W`代表实现`Write`trait的某种类型.按照惯例,类型参数通常是单个大写字母.
+
+`W`代表哪种类型取决于泛型函数的使用方式:
+
+```Rust
+say_hello(&mut local_file)?;  // calls say_hello::<File>
+say_hello(&mut bytes)?;       // calls say_hello::<Vec<u8>>
+```
+
+当你将`&mut local_file`传递给泛型的`say_hello()`函数时,你正在调用`say_hello::<File>()`.Rust为此函数生成调用`File::write_all()`和`File::flush()`的机器码.当你传递`&mut byte`时,你正在调用`say_hello::<Vec<u8>>()`.Rust为此版本的函数生成单独的机器码,调用相应的`Vec<u8>`方法.在这两种情况下,Rust都会根据参数的类型推断出类型`W`.你可以总是拼写出类型参数:
+
+```Rust
+say_hello::<File>(&mut local_file)?;
+```
+
+但它很少需要,因为Rust通常可以通过查看参数来推断出类型参数.这里,`say_hello`泛型函数需要一个`&mut W`参数,我们传递给它一个`&mut File`因此Rust推断出`W = File`.
+
+如果你正在调用的泛型函数没有任何提供有用线索的参数,那么你可能需要拼写出来:
+
+```Rust
+// calling a generic method collect<C>() that takes no arguments
+let v1 = (0 .. 1000).collect();  // error: can't infer type
+let v2 = (0 .. 1000).collect::<Vec<i32>>(); // ok
+```
+
+有时我们需要一个类型参数的多种能力.例如,如果我们想打印出向量中前10个最常见的值,我们需要这些值是可打印的:
+
+```Rust
+use std::fmt::Debug;
+
+fn top_ten<T: Debug>(values: &Vec<T>) { ... }
+```
+
+但这还不够好.我们如何计划确定哪些值最常见?通常的方法是将值用作哈希表中的键.这意味着值需要支持`Hash`和`Eq`操作.`T`上的限制必须包括这些以及`Debug`.其语法使用`+`号:
+
+```Rust
+fn top_ten<T: Debug + Hash + Eq>(values: &Vec<T>) { ... }
+```
+
+有些类型实现`Debug`,有些实现`Hash`,有些支持`Eq`;还有一些,比如`u32`和`String`,实现了所有这三个,如图11-2所示.
+
+*图11-2. 作为类型集合的Traits*
+
+类型参数也可以根本没有限制,但如果没有为其指定任何限制,则无法对值进行多少操作.你可以移动它.你可以把它放在一个盒子(box)或向量中.就是这样.
+
+泛型函数可以有多个类型参数:
+
+```Rust
+/// Run a query on a large, partitioned data set.
+/// See <http://research.google.com/archive/mapreduce.html>.
+fn run_query<M: Mapper + Serialize, R: Reducer + Serialize>(
+    data: &DataSet, map: M, reduce: R) -> Results
+{ ... }
+```
+
+正如这个例子所示,限制可能会很长,以至于眼睛很难看.Rust提供了另一种语法,使用关键字`where`:
+
+```Rust
+fn run_query<M, R>(data: &DataSet, map: M, reduce: R) -> Results
+    where M: Mapper + Serialize,
+          R: Reducer + Serialize
+{ ... }
+```
+
+类型参数`M`和`R`仍然在前面声明,但是限制被移动到单独的行.在泛型结构,枚举,类型别名和方法上也允许使用这种`where`子句--允许任何限制.
+
+当然,`where`子句的替代方法是保持简单:找到一种编写程序的方法,而不是非常集中地使用泛型.
+
+第105页的"接受引用作为参数(Receiving References as Parameters)"介绍了生命周期参数的语法.泛型函数可以包含生命周期参数和类型参数.生命周期参数先出现.
+
+```Rust
+/// Return a reference to the point in `candidates` that's
+/// closest to the `target` point.
+fn nearest<'t, 'c, P>(target: &'t P, candidates: &'c [P]) -> &'c P
+    where P: MeasureDistance
+{
+    ...
+}
+```
+
+这个函数有两个参数,`target`和`candidate`.两者都是引用,我们给它们不同的生命周期`'t`和`'c`(如第111页的"不同的生命周期参数(Distinct Lifetime Parameters)"中所述).此外,该函数适用于实现`MeasureDistance`trait的任何类型`P`,因此我们可以在一个程序中使用`Point2d`值而在另一个程序中使用`Point3d`值.
+
+生命周期永远不会对机器码产生任何影响.对`nearest()`的两次调用使用相同的类型`P`,但生命周期不同,将调用相同的编译函数.只有不同的类型才会导致Rust编译泛型函数的多个副本.
+
+当然,函数不是Rust中唯一的泛型代码.
+
+- 我们已经在第202页的"泛型结构(Generic Structs)"和第218页的"泛型枚举(Generic Enums)"中介绍了泛型类型.
+
+- 单个方法可以是泛型的,即使它定义的类型不是泛型的:
+
+```Rust
+impl PancakeStack {
+    fn push<T: Topping>(&mut self, goop: T) -> PancakeResult<()> {
+        ...
+    }
+}
+```
+
+- 类型别名也可以是泛型的:
+
+```Rust
+type PancakeResult<T> = Result<T, PancakeError>;
+```
+
+- 我们将在本章后面介绍泛型trait.
+
+此节介绍的所有功能--限制,`where`子句,生命周期参数等--都可用于所有泛型项,而不仅仅是函数.
+
+### 使用哪种(Which to Use)
+
+选择使用trait对象还是泛型代码是很微妙的.由于这两个特性都基于trait,因此它们有很多共同之处.
+
+当你需要混合类型的值的集合时,Trait对象是正确的选择.制作泛型沙拉在技术上是可行的:
+
+```Rust
+trait Vegetable {
+    ...
+}
+
+struct Salad<V: Vegetable> {
+    veggies: Vec<V>
+}
+```
+
+但这是一个相当严格的设计.每个这样的沙拉完全由单一类型的蔬菜组成.并不是每个人都适合这种东西.你的一位作者曾经花了14美元购买了一份`Salad<IcebergLettuce>`,但从未完全体会过这种经历.
+
+我们怎样才能做出更好的沙拉?由于`Vegetable`值可以是不同的大小,我们不能问Rust要一个`Vec<Vegetable>`:
+
+```Rust
+struct Salad {
+    veggies: Vec<Vegetable>  // error: `Vegetable` does not have
+                             //        a constant size
+}
+```
+
+Trait对象是解决方案:
+
+```Rust
+struct Salad {
+    veggies: Vec<Box<Vegetable>>
+}
+```
