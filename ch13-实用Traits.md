@@ -493,3 +493,212 @@ impl<'a, T, U> AsRef<U> for &'a T
 尽管`AsRef`和`AsMut`非常简单,但为引用转换提供标准的,泛型的trait可以避免更特定的转换trait的扩散.当你可以实现`AsRef<Foo>`时,你应该避免定义你自己的`AsFoo`trait.
 
 ## Borrow和BorrowMut(Borrow and BorrowMut)
+
+`std::borrow::Borrow`trait类似于`AsRef`:如果一个类型实现`Borrow<T>`,那么它的`borrow`方法有效地从它借用一个`&T`.但是`Borrow`强加了更多的限制:一个类型应该只在`&T`哈希,和比较,与它借用的值的方式相同时实现`Borrow<T>`.(Rust没有强制执行此操作;它只是trait的文档意图.)这使得`Borrow`在处理哈希表和树中的键时很有用,或者在处理由于某些其他原因而被哈希或比较的值时.
+
+从`String`借用时这种区别很重要,例如:`String`实现了`AsRef<&str>`,`AsRef<[u8]>`和`AsRef<Path>`,但这三种目标类型通常会有不同的哈希值.只有`&str`切片保证像等效的`String`一样哈希,因此`String`只实现`Borrow<str>`.
+
+`Borrow`的定义与`AsRef`的定义相同;只有名字变了:
+
+```Rust
+trait Borrow<Borrowed: ?Sized> {
+    fn borrow(&self) -> &Borrowed;
+}
+```
+
+`Borrow`旨在通过泛型哈希表和其他相关集合类型来解决特定情况.例如,假设你有一个`std::collections::HashMap<String, i32>`,将字符串映射到数字.这个表的键是`String`;每个条目都拥有一个.查找此表中条目的方法的签名应该是什么?这是第一次尝试:
+
+```Rust
+impl HashMap<K, V> where K: Eq + Hash
+{
+    fn get(&self, key: K) -> Option<&V> { ... }
+}
+```
+
+这是有道理的:要查找条目,你必须为表提供适当类型的键.但在这种情况下,`K`是`String`;这个签名会强制你通过值传递一个`String`来进行每次`get`调用,这显然很浪费.你实际只需要一个键的引用:
+
+```Rust
+impl HashMap<K, V> where K: Eq + Hash
+{
+    fn get(&self, key: &K) -> Option<&V> { ... }
+}
+```
+
+这稍微好一点,但是现在你必须将键作为`&String`传递,所以如果你想查找一个常量字符串,你必须写:
+
+```Rust
+hashtable.get(&"twenty-two".to_string())
+```
+
+这很荒谬:它在堆上分配一个`String`缓冲区并将文本复制到其中,这样它就可以将它作为`&String`借用,传递给`get`,然后删除它.
+
+它应该足以传递任何可以进行哈希并与我们的键类型进行比较的内容;例如,`&str`应该是完全足够的.所以这是最后的迭代,这是你在标准库中可以找到的:
+
+```Rust
+impl HashMap<K, V> where K: Eq + Hash
+{
+    fn get<Q: ?Sized>(&self, key: &Q) -> Option<&V>
+        where K: Borrow<Q>,
+              Q: Eq + Hash
+    { ... }
+}
+```
+
+换句话说,如果你可以借用条目的键为`&Q`,并且结果引用哈希和比较以键本身的方式,那么显然`&Q`应该是可接受的键类型.由于`String`实现了`Borrow<str>`和`Borrow<String>`,因此`get`的最终版本允许你根据需要传递`&String`或`&str`作为键.
+
+`Vec<T>`和`[T: N]`实现`Borrow<[T]>`.每个类似字符串的类型都允许借用其相应的切片类型:`String`实现`Borrow<str>`,`PathBuf`实现`Borrow<Path>`,等等.并且所有标准库的相关集合类型都使用`Borrow`来决定哪些类型可以传递给它们的查找函数.
+
+标准库包含一个通用的实现,这样每个类型`T`都可以从它自己借用:`T: Borrow<t>`.这确保了`&K`始终是用于查找`HashMap<K, V>`中的条目的可接受类型.
+
+为了方便起见,每个`&mut T`类型也实现了`Borrow<T>`,像往常一样返回共享引用`&T`.这允许你将可变引用传递给集合查找函数,而不必重新借用共享引用,模拟Rust通常的隐式强制从可变引用到共享引用.
+
+`BorrowMut`trait类似于`Borrow`,用于可变引用:
+
+```Rust
+trait BorrowMut<Borrowed: ?Sized>: Borrow<Borrowed> {
+    fn borrow_mut(&mut self) -> &mut Borrowed;
+}
+```
+
+对`Borrow`的描述也适用于`BorrowMut`.
+
+## From和Into(From and Into)
+
+`std::convert::From`和`std::convert::Into`traits表示转换,消费一种类型的值,返回另一种类型的值.`AsRef`和`AsMut`traits从另一个类型借用一种类型的引用,而`From`和`Into`获取其参数的所有权,转换它,然后将结果的所有权返回给调用者.
+
+他们的定义非常对称:
+
+```Rust
+trait Into<T>: Sized {
+    fn into(self) -> T;
+}
+
+trait From<T>: Sized {
+    fn from(T) -> Self;
+}
+```
+
+标准库自动实现从每种类型到自身的简单转换:每个类型`T`实现`From<T>`和`Into<T>`.
+
+虽然这些traits只是提供了两种方法来做同样的事情,但它们适合不同的用途.
+
+你通常使用`Into`来使你的函数在它们接受的参数中更加灵活.例如,如果你写:
+
+```Rust
+use std::net::Ipv4Addr;
+fn ping<A>(address: A) -> std::io::Result<bool>
+    where A: Into<Ipv4Addr>
+{
+    let ipv4_address = address.into();
+    ...
+}
+```
+
+然后`ping`不仅可以接受`Ipv4Addr`作为参数,还可以接受`u32`或`[u8; 4]`数组,因为这些类型都很方便地实现了`Into<Ipv4Addr>`.(将IPv4地址视为单个32位值或四个字节的数组有时很有用.)因为`ping`对`address`的唯一了解是它实现了`Into<Ipv4Addr>`,所以当你调用`into`时,不需要指定你想要哪种类型;只有一种类型可以工作,所以类型推断帮你解决.
+
+与之前一节中的`AsRef`一样,效果非常类似于C++中的重载函数.通过之前的`ping`定义,我们可以进行以下任何调用:
+
+```Rust
+println!("{:?}", ping(Ipv4Addr::new(23, 21, 68, 141))); // pass an Ipv4Addr
+println!("{:?}", ping([66, 146, 219, 98]));             // pass a [u8; 4]
+println!("{:?}", ping(0xd076eb94_u32));                 // pass a u32
+```
+
+然而,`From`trait有着不同的作用.`from`方法用作泛型构造函数,用于从其他单个值生成类型的实例.例如,`Ipv4Addr`没有两个名为`from_array`和`from_u32`的方法,它只是实现了`From<[u8; 4]>`和`From<u32>`,允许我们写:
+
+```Rust
+let addr1 = Ipv4Addr::from([66, 146, 219, 98]);
+let addr2 = Ipv4Addr::from(0xd076eb94_u32);
+```
+
+我们可以让类型推断决定应用哪种实现.
+
+给定适当的`From`实现,标准库自动实现相应的`Into`trait.当你定义自己的类型时,如果它具有单参数构造函数,则应将它们编写为对于适当的类型的`From<T>`的实现;你将免费获得相应的`Into`实现.
+
+由于`from`和`into`转换方法获取其参数的所有权,因此转换可以重用原始值的资源来构造转换后的值.例如,假设你这样写:
+
+```Rust
+let text = "Beautiful Soup".to_string();
+let bytes: Vec<u8> = text.into();
+```
+
+用于`String`的`Into<Vec<u8>>`的实现只是获取`String`的堆缓冲区,将其重新定位(不改变)为返回的向量的元素缓冲区.转换无需分配或复制文本.这是移动实现高效实现的另一种情况.
+
+这些转换也提供了一种很好的方法,可以将约束类型的值放宽到更灵活的范围,而不会削弱约束类型的保证.例如,`String`保证其内容始终时有效UTF-8;它的变异方法受到严格限制,以确保你所做的一切都不会引入错误的UTF-8.但是这个例子有效地将一个`String`"降级(demotes)"为一个普通字节块,你可以用它做任何你喜欢的事情:也许你要压缩它,或者将它与其他不是UTF-8的二进制数据结合起来.因为`into`通过值获取其参数,所以在转换后不再初始化`text`,这意味着我们可以自由访问前一个`String`的缓冲区而不会破坏任何现存的`String`.
+
+但是,廉价的转换不是`Into`和`From`合同的一部分.虽然`AsRef`和`AsMut`转换预计会很便宜,但`From`和`Into`转换可能会分配,复制或以其他方式处理值的内容.例如,`String`实现了`From<&str>`,它将字符串切片复制到`String`的新的堆分配缓冲区中.`std::collections::BinaryHeap<T>`实现`From<Vec<T>>`,它根据算法的要求对元素进行比较和重新排序.
+
+请注意,`From`和`Into`仅限于永不失败的转换.方法的类型签名不提供任何方式来指示给定的转换没有成功.要提供进入或退出类型的可出错转换,最好使用返回`Result`类型的函数或方法.
+
+在将`From`和`Into`添加到标准库之前,Rust代码充满了临时转换trait和构造方法,每个特定于单个类型.`From`和`Into`整理了你可以遵循的约定,使你的类型更易于使用,因为你的用户已经很熟悉它们.
+
+## ToOwned(ToOwned)
+
+给定引用,生成其所指对象的拥有副本的通用方式是调用`clone`,假设该类型实现了`std::clone::Clone`.但是如果你想克隆一个`&str`或者`&[i32]`怎么办?你可能需要的是`String`或`Vec<i32>`,但`Clone`的定义不允许:根据定义,克隆`&T`必须始终返回`T`类型的值,但是`str`和`[u8]`是无大小的;它们甚至不是函数可以返回的类型.
+
+`std::borrow::ToOwned`trait提供了一种稍微宽松的方式来将引用转换为拥有的值:
+
+```Rust
+trait ToOwned {
+    type Owned: Borrow<Self>;
+    fn to_owned(&self) -> Self::Owned;
+}
+```
+
+与`clone`(它必须精确地返回`Self`)不同,`to_owned`可以返回任何你可以从中借用`&Self`的东西:`Owned`类型必须实现`Borrow<Self>`.你可以从`Vec<T>`借用一个`&[T]`,所以`[T]`可以实现`ToOwned<Owned=Vec<T>>`,只要`T`实现`Clone`,这样我们就可以将切片的元素复制到向量中.类似地,`str`实现`ToOwned<Owned=String>`,`Path`实现`ToOwned<Owned=PathBuf>`,等等.
+
+## Borrow和ToOwned的使用:谦恭的Cow(Borrow and ToOwned at Work: The Humble Cow)
+
+充分利用Rust需要思考所有权问题,比如函数是应该通过引用还是通过值接收参数.通常你可以采用一种方法或另一种方法,参数的类型反映了你的决定.但在某些情况下,在程序运行之前,你无法决定是借用还是拥有;`std::borrow::Cow`类型(用于"写时克隆(“clone on write)")提供了一种方式.
+
+其定义如下：
+
+```Rust
+enum Cow<'a, B: ?Sized + 'a>
+    where B: ToOwned
+{
+    Borrowed(&'a B),
+    Owned(<B as ToOwned>::Owned),
+}
+```
+
+`Cow<B>`要么借用对`B`的共享引用,要么拥有一个值,我们可以从中借用这样的引用.由于`Cow`实现了`Deref`,你可以调用它上面的方法,好像它是对`B`的共享引用:如果它是`Owned`,它借用对拥有值的共享引用;如果它是`Borrowed`,它只是递出它所持有的引用.
+
+你还可以通过调用其`to_mut`方法获取对`Cow`的值的可变引用,该方法返回`&mut B`.如果`Cow`恰好是`Cow::Borrowed`,`to_mut`只是调用引用的`to_owned`方法来获取它自己的引用对象副本,将`Cow`更改为`Cow::Owned`,并借用对新的拥有值的可变引用.这是类型名称所指的"写时克隆(clone on write)"行为.
+
+类似地,`Cow`有一个`in_owned`方法,在必要时提升对拥有值的引用,然后返回它,将所有权移动到调用者并在此过程中消耗`Cow`.
+
+`Cow`的一个常见用途是返回静态分配的字符串常量或计算的字符串.例如,假设你需要将错误枚举转换为消息.大多数变体可以使用固定字符串进行处理,但其中一些变量还包含应包含在消息中的其他数据.你可以返回一个`Cow<'static, str>`:
+
+```Rust
+use std::path::PathBuf;
+use std::borrow::Cow;
+fn describe(error: &Error) -> Cow<'static, str> {
+    match *error {
+        Error::OutOfMemory => "out of memory".into(),
+        Error::StackOverflow => "stack overflow".into(),
+        Error::MachineOnFire => "machine on fire".into(),
+        Error::Unfathomable => "machine bewildered".into(),
+        Error::FileNotFound(ref path) => {
+            format!("file not found: {}", path.display()).into()}
+    }
+}
+```
+
+此代码使用`Cow`的`Into`实现来构造值.这个`match`语句的大多数分支返回一个`Cow::Borrowed`,指的是静态分配的字符串.但是当我们得到`FileNotFound`变体时,我们使用`format!`构造包含给定文件名的消息.`match`语句的这一分支产生一个`Cow::Owned`值.
+
+`describe`的调用者不需要更改值可以简单地将`Cow`视为`&str`:
+
+```Rust
+println!("Disaster has struck: {}", describe(&error));
+```
+
+需要拥有值的调用者可以轻松生成一个:
+
+```Rust
+let mut log: Vec<String> = Vec::new();
+...
+log.push(describe(&error).into_owned());
+```
+
+使用`Cow`可以帮助`describe`和其调用者将分配推迟到需要分配的时候.
